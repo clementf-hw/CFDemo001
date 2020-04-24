@@ -1,62 +1,78 @@
 package com.cfdemo.demo001;
 
-import android.Manifest;
+import android.app.Activity;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.content.pm.PackageManager;
-import android.os.Build;
+import android.content.IntentSender;
+
 import android.os.Bundle;
 import com.huawei.agconnect.config.AGConnectServicesConfig;
+import com.huawei.hmf.tasks.OnFailureListener;
+import com.huawei.hmf.tasks.OnSuccessListener;
 import com.huawei.hms.aaid.HmsInstanceId;
 
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.widget.Toolbar;
-import androidx.core.app.ActivityCompat;
+
 import androidx.core.app.NotificationManagerCompat;
 import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 
+import android.os.Looper;
 import android.text.TextUtils;
 import android.util.Log;
-import android.view.View;
-import android.widget.TextView;
-import android.widget.Toast;
 
-import com.huawei.hms.maps.CameraUpdate;
-import com.huawei.hms.maps.CameraUpdateFactory;
+import com.huawei.hms.common.ApiException;
+import com.huawei.hms.common.ResolvableApiException;
+import com.huawei.hms.location.FusedLocationProviderClient;
+import com.huawei.hms.location.LocationCallback;
+import com.huawei.hms.location.LocationRequest;
+import com.huawei.hms.location.LocationResult;
+import com.huawei.hms.location.LocationServices;
+import com.huawei.hms.location.LocationSettingsRequest;
+import com.huawei.hms.location.LocationSettingsResponse;
+import com.huawei.hms.location.LocationSettingsStatusCodes;
+import com.huawei.hms.location.SettingsClient;
 import com.huawei.hms.maps.HuaweiMap;
 import com.huawei.hms.maps.MapView;
 import com.huawei.hms.maps.OnMapReadyCallback;
-import com.huawei.hms.maps.model.LatLng;
 
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import io.branch.referral.Branch;
+import io.branch.referral.BranchError;
+
+import static com.cfdemo.demo001.LocationHelper.onLocationCallBack;
+import static com.cfdemo.demo001.LocationHelper.onLocationReceived;
+import static com.cfdemo.demo001.PermissionHelper.checkPermissions;
+import static com.cfdemo.demo001.PermissionHelper.onPermissionGranted;
+import static com.cfdemo.demo001.UtilHelper.showText;
+import static com.cfdemo.demo001.UtilHelper.stringVerify;
+
 public class MainActivity extends AppCompatActivity implements OnMapReadyCallback {
     protected String pushToken;
     private static final String TAG = "CFDemo001LogTag";
-    private static final int REQUEST_CODE = 316;
-    private DemoHmsMessageService messageService;
     private HuaweiMap hMap;
     private MapView mMapView;
-    private static final String[] RUNTIME_PERMISSIONS = {
-            Manifest.permission.WRITE_EXTERNAL_STORAGE,
-            Manifest.permission.READ_EXTERNAL_STORAGE,
-            Manifest.permission.ACCESS_COARSE_LOCATION,
-            Manifest.permission.ACCESS_FINE_LOCATION,
-            Manifest.permission.INTERNET
-    };
     private static final String MAPVIEW_BUNDLE_KEY = "MapViewBundleKey";
+    private FusedLocationProviderClient fusedLocationProviderClient;
+    private LocationRequest mLocationRequest;
+    private LocationCallback mLocationCallback = new LocationCallback() {
+        @Override
+        public void onLocationResult(LocationResult locationResult) {
+            onLocationCallBack(locationResult, hMap);
+        }
+    };
+    private Activity activityReference = this;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        if (!hasPermissions(this, RUNTIME_PERMISSIONS)) {
-            ActivityCompat.requestPermissions(this, RUNTIME_PERMISSIONS, REQUEST_CODE);
-        }
+        checkPermissions(this);
         Log.d(TAG, "Notification Enabled: " + NotificationManagerCompat.from(this).areNotificationsEnabled());
         //get mapview instance
         mMapView = findViewById(R.id.mapView);
@@ -68,19 +84,23 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
         //get map instance
         mMapView.getMapAsync(this);
 
+        fusedLocationProviderClient = LocationServices.getFusedLocationProviderClient(this);
+
         Toolbar toolbar = findViewById(R.id.toolbar);
         setSupportActionBar(toolbar);
         getToken();
         LocalBroadcastManager.getInstance(this).registerReceiver(messageListener,
                 new IntentFilter("hmsMessageService"));
-        String initialText =  NotificationManagerCompat.from(this).areNotificationsEnabled() ? "HMS Demo" : "Please enable notification for this app";
-        showText(initialText);
+        String initialText =  NotificationManagerCompat.from(this).areNotificationsEnabled() ? "Waiting for push token..." : "Please enable notification for this app";
+        showText(this, initialText);
     }
 
     @Override
     protected void onStart() {
         super.onStart();
         mMapView.onStart();
+        Branch.getInstance().initSession(branchReferralInitListener, this.getIntent().getData(), this);
+
     }
 
     @Override
@@ -107,7 +127,27 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
         super.onDestroy();
         LocalBroadcastManager.getInstance(this).unregisterReceiver(messageListener);
         mMapView.onDestroy();
+        removeLocationUpdatesWithCallback();
     }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+    }
+
+    private Branch.BranchReferralInitListener branchReferralInitListener = new Branch.BranchReferralInitListener() {
+        @Override
+        public void onInitFinished(JSONObject linkProperties, BranchError error) {
+            // do stuff with deep link data (nav to page, display content, etc)
+            if (error == null) {
+                Log.i(TAG, "BRANCH SDK Success " + linkProperties.toString());
+                handleData(linkProperties);
+            } else {
+                Log.i(TAG, "BRANCH SDK Error " + error.getMessage());
+            }
+        }
+    };
 
     private void getToken() {
         Log.d(TAG, "get token: begin");
@@ -130,13 +170,6 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
         }.start();
     }
 
-    private boolean stringVerify (String input) {
-        if (input == null || TextUtils.isEmpty(input)){
-            return false;
-        }
-        return true;
-    }
-
     private BroadcastReceiver messageListener = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent ) {
@@ -150,20 +183,34 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
                 Log.d(TAG, data);
                 try {
                     JSONObject notificationData = new JSONObject(data);
-                    String message = notificationData.has("message") ? notificationData.getString("message") : null;
-                    if (stringVerify(message)) {
-                        onMessageReceived(message);
-                    }
-                    String location = notificationData.has("location") ? notificationData.getString("location") : null;
-                    if (stringVerify(location)) {
-                        onLocationReceived(location);
-                    }
+                    handleData(notificationData);
                 } catch (JSONException e) {
                     e.printStackTrace();
                 }
             }
         }
     };
+
+    private void handleData (JSONObject data) {
+        try {
+            String message = data.has("message") ? data.getString("message") : null;
+            if (stringVerify(message)) {
+                onMessageReceived(message);
+            }
+            String location = data.has("location") ? data.getString("location") : null;
+            if (stringVerify(location)) {
+                onLocationReceived(location, hMap);
+            } else {
+                Boolean myLocation = data.has("my_location") ? data.getBoolean("my_location") : null;
+                if (myLocation) {
+                    Log.d(TAG, "Set map to my location");
+                    requestLocationUpdatesWithCallback();
+                }
+            }
+        } catch (JSONException e) {
+            e.printStackTrace();
+        }
+    }
 
     @Override
     public void onMapReady(HuaweiMap huaweiMap) {
@@ -181,74 +228,82 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
     public void onRequestPermissionsResult(int requestCode,
                                            String[] permissions, int[] grantResults) {
         Log.d(TAG, "onRequestPermissionsResult " + requestCode);
-        switch (requestCode) {
-            case REQUEST_CODE: {
-                // If request is cancelled, the result arrays are empty.
-                if (grantResults.length > 0
-                        && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                    Log.d(TAG, "Permission Granted");
-                    // permission was granted, yay! Do the
-                    // contacts-related task you need to do.
-                } else {
-                    Log.d(TAG, "Permission Not Granted");
-                    // permission denied, boo! Disable the
-                    // functionality that depends on this permission.
-                }
-                return;
-            }
-            // other 'case' lines to check for other
-            // permissions this app might request.
-        }
-    }
-
-    private static boolean hasPermissions(Context context, String... permissions) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && permissions != null) {
-            for (String permission : permissions) {
-                if (ActivityCompat.checkSelfPermission(context, permission) != PackageManager.PERMISSION_GRANTED) {
-                    return false;
-                }
-            }
-        }
-        return true;
-    }
-
-    private void showText(final String input) {
-        runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                View txtLogView = findViewById(R.id.txt_display);
-                if (txtLogView instanceof TextView) {
-                    ((TextView) txtLogView).setText(input);
-                    Toast.makeText(MainActivity.this, pushToken, Toast.LENGTH_SHORT).show();
-                }
-            }
-        });
+        onPermissionGranted(requestCode, permissions, grantResults);
     }
 
     private void onTokenReceived(String token) {
-        showText("Token: " + token);
+        showText(this,"Token: " + token);
+        requestLocationUpdatesWithCallback();
     }
 
     private void onMessageReceived(String message) {
-        showText("Message: " + message);
+        showText(this,"Message: " + message);
     }
 
-    private void onLocationReceived(String location) {
-        LatLng coordinates;
+    private void requestLocationUpdatesWithCallback () {
+        SettingsClient settingsClient = LocationServices.getSettingsClient(this);
+        LocationSettingsRequest.Builder builder = new LocationSettingsRequest.Builder();
+        mLocationRequest = new LocationRequest();
+        builder.addLocationRequest(mLocationRequest);
+        LocationSettingsRequest locationSettingsRequest = builder.build();
+        //check Location Settings
+        settingsClient.checkLocationSettings(locationSettingsRequest)
+                .addOnSuccessListener(new OnSuccessListener<LocationSettingsResponse>() {
+                    @Override
+                    public void onSuccess(LocationSettingsResponse locationSettingsResponse) {
+                        //Have permissions， send requests
+                        fusedLocationProviderClient
+                                .requestLocationUpdates(mLocationRequest, mLocationCallback, Looper.getMainLooper())
+                                .addOnSuccessListener(new OnSuccessListener<Void>() {
+                                    @Override
+                                    public void onSuccess(Void aVoid) {
+                                        Log.d(TAG, "Request Location Success");
+                                        //Interface call successfully processed
+                                    }
+                                });
+                    }
+                })
+                .addOnFailureListener(new OnFailureListener() {
+                    @Override
+                    public void onFailure(Exception e) {
+                        //Settings do not meet targeting criteria
+                        Log.d(TAG, "Request location failed");
+                        showText(activityReference,"Location Request failed");
+                        int statusCode = ((ApiException) e).getStatusCode();
+                        switch (statusCode) {
+                            case LocationSettingsStatusCodes.RESOLUTION_REQUIRED:
+                                try {
+                                    ResolvableApiException rae = (ResolvableApiException) e;
+                                    //Calling startResolutionForResult can pop up a window to prompt the user to open the corresponding permissions
+                                    rae.startResolutionForResult(MainActivity.this, 0);
+                                } catch (IntentSender.SendIntentException sie) {
+                                    //…
+                                }
+                                break;
+                        }
+                    }
+                });
+    }
+
+    private void removeLocationUpdatesWithCallback() {
         try {
-            JSONObject locationData = new JSONObject(location);
-            Log.d(TAG, "location data: " + locationData.getDouble("lat") + "," + locationData.getDouble("lng"));
-            coordinates = new LatLng(locationData.getDouble("lat"), locationData.getDouble("lng"));
-
-        } catch (JSONException e) {
-            e.printStackTrace();
-            coordinates = new LatLng(0,0);
+            fusedLocationProviderClient.removeLocationUpdates(mLocationCallback)
+                    .addOnSuccessListener(new OnSuccessListener<Void>() {
+                        @Override
+                        public void onSuccess(Void aVoid) {
+                            Log.i(TAG, "removeLocationUpdatesWithCallback onSuccess");
+                        }
+                    })
+                    .addOnFailureListener(new OnFailureListener() {
+                        @Override
+                        public void onFailure(Exception e) {
+                            Log.e(TAG, "removeLocationUpdatesWithCallback onFailure:" + e.getMessage());
+                        }
+                    });
+        } catch (Exception e) {
+            Log.e(TAG, "removeLocationUpdatesWithCallback exception:" + e.getMessage());
         }
-        setMapTarget(coordinates);
     }
 
-    private void setMapTarget(LatLng coordinates) {
-        CameraUpdate cameraUpdate = CameraUpdateFactory.newLatLng(coordinates);
-        hMap.animateCamera(cameraUpdate);
-    }
+
 }
