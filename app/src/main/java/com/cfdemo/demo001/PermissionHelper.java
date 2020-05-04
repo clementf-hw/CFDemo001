@@ -17,7 +17,9 @@ public class PermissionHelper {
             Manifest.permission.ACCESS_COARSE_LOCATION,
             Manifest.permission.ACCESS_FINE_LOCATION,
             Manifest.permission.ACCESS_BACKGROUND_LOCATION,
-            Manifest.permission.INTERNET
+            Manifest.permission.INTERNET,
+            Manifest.permission.CAMERA,
+            Manifest.permission.READ_EXTERNAL_STORAGE
     };
     private static final int REQUEST_CODE = 316;
 

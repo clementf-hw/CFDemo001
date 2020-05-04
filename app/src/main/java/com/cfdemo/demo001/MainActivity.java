@@ -22,9 +22,16 @@ import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 import android.os.Looper;
 import android.text.TextUtils;
 import android.util.Log;
+import android.view.View;
+import android.widget.FrameLayout;
 
+import com.huawei.hms.ads.AdParam;
+import com.huawei.hms.ads.BannerAdSize;
+import com.huawei.hms.ads.HwAds;
+import com.huawei.hms.ads.banner.BannerView;
 import com.huawei.hms.common.ApiException;
 import com.huawei.hms.common.ResolvableApiException;
+import com.huawei.hms.hmsscankit.ScanUtil;
 import com.huawei.hms.location.FusedLocationProviderClient;
 import com.huawei.hms.location.LocationCallback;
 import com.huawei.hms.location.LocationRequest;
@@ -37,6 +44,8 @@ import com.huawei.hms.location.SettingsClient;
 import com.huawei.hms.maps.HuaweiMap;
 import com.huawei.hms.maps.MapView;
 import com.huawei.hms.maps.OnMapReadyCallback;
+import com.huawei.hms.ml.scan.HmsScan;
+import com.huawei.hms.ml.scan.HmsScanAnalyzerOptions;
 
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -59,6 +68,8 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
     private static final String MAPVIEW_BUNDLE_KEY = "MapViewBundleKey";
     private FusedLocationProviderClient fusedLocationProviderClient;
     private LocationRequest mLocationRequest;
+    private static final int REQUEST_CODE_SCAN = 000567; // change this code to fit your need
+
     private LocationCallback mLocationCallback = new LocationCallback() {
         @Override
         public void onLocationResult(LocationResult locationResult) {
@@ -71,28 +82,23 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
-
-        checkPermissions(this);
-        Log.d(TAG, "Notification Enabled: " + NotificationManagerCompat.from(this).areNotificationsEnabled());
-        //get mapview instance
-        mMapView = findViewById(R.id.mapView);
-        Bundle mapViewBundle = null;
-        if (savedInstanceState != null) {
-            mapViewBundle = savedInstanceState.getBundle(MAPVIEW_BUNDLE_KEY);
-        }
-        mMapView.onCreate(mapViewBundle);
-        //get map instance
-        mMapView.getMapAsync(this);
-
-        fusedLocationProviderClient = LocationServices.getFusedLocationProviderClient(this);
-
         Toolbar toolbar = findViewById(R.id.toolbar);
         setSupportActionBar(toolbar);
+
+        checkPermissions(this);
+        HwAds.init(this);
+
+        initMapView(savedInstanceState);
+        fusedLocationProviderClient = LocationServices.getFusedLocationProviderClient(this);
         getToken();
+
         LocalBroadcastManager.getInstance(this).registerReceiver(messageListener,
                 new IntentFilter("hmsMessageService"));
+        Log.d(TAG, "Notification Enabled: " + NotificationManagerCompat.from(this).areNotificationsEnabled());
         String initialText =  NotificationManagerCompat.from(this).areNotificationsEnabled() ? "Waiting for push token..." : "Please enable notification for this app";
         showText(this, initialText);
+
+        loadBannerAd();
     }
 
     @Override
@@ -100,7 +106,6 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
         super.onStart();
         mMapView.onStart();
         Branch.getInstance().initSession(branchReferralInitListener, this.getIntent().getData(), this);
-
     }
 
     @Override
@@ -136,39 +141,38 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
         setIntent(intent);
     }
 
-    private Branch.BranchReferralInitListener branchReferralInitListener = new Branch.BranchReferralInitListener() {
-        @Override
-        public void onInitFinished(JSONObject linkProperties, BranchError error) {
-            // do stuff with deep link data (nav to page, display content, etc)
-            if (error == null) {
-                Log.i(TAG, "BRANCH SDK Success " + linkProperties.toString());
-                handleData(linkProperties);
-            } else {
-                Log.i(TAG, "BRANCH SDK Error " + error.getMessage());
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        //receive result after your activity finished scanning
+        super.onActivityResult(requestCode, resultCode, data);
+        if (resultCode != RESULT_OK || data == null) {
+            return;
+        }
+        // Obtain the return value of HmsScan from the value returned by the onActivityResult method by using ScanUtil.RESULT as the key value.
+        if (requestCode == REQUEST_CODE_SCAN) {
+            Object obj = data.getParcelableExtra(ScanUtil.RESULT);
+            if (obj instanceof HmsScan) {
+                if (!TextUtils.isEmpty(((HmsScan) obj).getOriginalValue())) {
+                    try {
+                        JSONObject codeData = new JSONObject(((HmsScan) obj).getOriginalValue());
+                        handleData(codeData);
+                    } catch (Exception e) {
+                        Log.d(TAG, ""+e);
+                    }
+                }
+                return;
             }
         }
-    };
-
-    private void getToken() {
-        Log.d(TAG, "get token: begin");
-
-        // get token
-        new Thread() {
-            @Override
-            public void run() {
-                try {
-                    String appId = AGConnectServicesConfig.fromContext(MainActivity.this).getString("client/app_id");
-                    pushToken = HmsInstanceId.getInstance(MainActivity.this).getToken(appId, "HCM");
-                    if(!TextUtils.isEmpty(pushToken)) {
-                        Log.d(TAG, "get token:" + pushToken);
-                        onTokenReceived(pushToken);
-                    }
-                } catch (Exception e) {
-                    Log.d(TAG,"getToken failed, " + e);
-                }
-            }
-        }.start();
     }
+
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode,
+                                           String[] permissions, int[] grantResults) {
+        Log.d(TAG, "onRequestPermissionsResult " + requestCode);
+        onPermissionGranted(requestCode, permissions, grantResults);
+    }
+
 
     private BroadcastReceiver messageListener = new BroadcastReceiver() {
         @Override
@@ -191,6 +195,68 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
         }
     };
 
+    private Branch.BranchReferralInitListener branchReferralInitListener = new Branch.BranchReferralInitListener() {
+        @Override
+        public void onInitFinished(JSONObject linkProperties, BranchError error) {
+            // do stuff with deep link data (nav to page, display content, etc)
+            if (error == null) {
+                Log.i(TAG, "BRANCH SDK Success " + linkProperties.toString());
+                handleData(linkProperties);
+            } else {
+                Log.i(TAG, "BRANCH SDK Error " + error.getMessage());
+            }
+        }
+    };
+
+    private void initMapView(Bundle savedInstanceState) {
+        mMapView = findViewById(R.id.mapView);
+        Bundle mapViewBundle = null;
+        if (savedInstanceState != null) {
+            mapViewBundle = savedInstanceState.getBundle(MAPVIEW_BUNDLE_KEY);
+        }
+        mMapView.onCreate(mapViewBundle);
+        //get map instance
+        mMapView.getMapAsync(this);
+    }
+
+    @Override
+    public void onMapReady(HuaweiMap huaweiMap) {
+        Log.d(TAG, "onMapReady: ");
+        hMap = huaweiMap;
+        // Specify whether to enable the compass.
+        hMap.getUiSettings().setCompassEnabled(true);
+        // Enable the my-location layer.
+        hMap.setMyLocationEnabled(true);
+        // Enable the function of displaying the my-location icon.
+        hMap.getUiSettings().setMyLocationButtonEnabled(true);
+    }
+
+    private void getToken() {
+        Log.d(TAG, "get token: begin");
+
+        // get token
+        new Thread() {
+            @Override
+            public void run() {
+                try {
+                    String appId = AGConnectServicesConfig.fromContext(MainActivity.this).getString("client/app_id");
+                    pushToken = HmsInstanceId.getInstance(MainActivity.this).getToken(appId, "HCM");
+                    if(!TextUtils.isEmpty(pushToken)) {
+                        Log.d(TAG, "get token:" + pushToken);
+                        onTokenReceived(pushToken);
+                    }
+                } catch (Exception e) {
+                    Log.d(TAG,"getToken failed, " + e);
+                }
+            }
+        }.start();
+    }
+
+    private void onTokenReceived(String token) {
+        showText(this,"Token: " + token);
+        requestLocationUpdatesWithCallback();
+    }
+
     private void handleData (JSONObject data) {
         try {
             String message = data.has("message") ? data.getString("message") : null;
@@ -210,30 +276,6 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
         } catch (JSONException e) {
             e.printStackTrace();
         }
-    }
-
-    @Override
-    public void onMapReady(HuaweiMap huaweiMap) {
-        Log.d(TAG, "onMapReady: ");
-        hMap = huaweiMap;
-        // Specify whether to enable the compass.
-        hMap.getUiSettings().setCompassEnabled(true);
-        // Enable the my-location layer.
-        hMap.setMyLocationEnabled(true);
-        // Enable the function of displaying the my-location icon.
-        hMap.getUiSettings().setMyLocationButtonEnabled(true);
-    }
-
-    @Override
-    public void onRequestPermissionsResult(int requestCode,
-                                           String[] permissions, int[] grantResults) {
-        Log.d(TAG, "onRequestPermissionsResult " + requestCode);
-        onPermissionGranted(requestCode, permissions, grantResults);
-    }
-
-    private void onTokenReceived(String token) {
-        showText(this,"Token: " + token);
-        requestLocationUpdatesWithCallback();
     }
 
     private void onMessageReceived(String message) {
@@ -305,5 +347,18 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
         }
     }
 
+    private void loadBannerAd () {
+        BannerView bannerView = new BannerView(this);
+        // "testw6vs28auh3" is a dedicated test ad slot ID.
+        bannerView.setAdId("testw6vs28auh3");
+        bannerView.setBannerAdSize(BannerAdSize.BANNER_SIZE_320_50);
+        FrameLayout adFrameLayout = findViewById(R.id.ad_frame);
+        adFrameLayout.addView(bannerView);
+        AdParam adParam = new AdParam.Builder().build();
+        bannerView.loadAd(adParam);
+    }
 
+    public void onScanCode(View view) {
+        ScanUtil.startScan(MainActivity.this, REQUEST_CODE_SCAN, new HmsScanAnalyzerOptions.Creator().setHmsScanTypes(HmsScan.ALL_SCAN_TYPE).create());
+    }
 }
